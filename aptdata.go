@@ -10,11 +10,20 @@ import "errors"
 import "time"
 
 type AptDB struct {
-	boltDB *bolt.DB
+	boltDB    *bolt.DB
+	populated bool
 }
 
 func (a *AptDB) Close() error {
 	return a.boltDB.Close()
+}
+
+type ErrUnpopulated struct {
+	msg string
+}
+
+func (e ErrUnpopulated) Error() (msg string) {
+	return e.msg
 }
 
 type Airport struct {
@@ -52,7 +61,7 @@ type Runway struct {
 }
 
 func downloadDataFile(dataDir string, filename string, url string, c chan error) {
-	fmt.Println("Downloading", filename)
+	// fmt.Println("Downloading", filename)
 	fullPath := fmt.Sprintf("%s/%s", dataDir, filename)
 	out, err := os.Create(fullPath)
 	if err != nil {
@@ -68,6 +77,7 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 	}
 	if response.StatusCode != 200 {
 		c <- errors.New(fmt.Sprintf("response code %d for %s", response.StatusCode, url))
+		//c <- DownloadError{message: fmt.Sprintf("response code %d for %s", response.StatusCode, url)}
 		out.Close()
 		os.Remove(fullPath)
 		return
@@ -83,14 +93,44 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 	c <- nil
 }
 
-func OpenDB(path string) (db *AptDB, err error) {
+func OpenDB(path string, create bool) (db *AptDB, err error) {
 	var boltDB *bolt.DB
+	//populated := false
+
 	boltDB, err = bolt.Open(path, 0644, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	err = boltDB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Meta"))
+		if b == nil {
+			return ErrUnpopulated{"meta bucket does not exist"}
+		}
+		//v := b.Get([]byte("IsPopulated"))
+		//fmt.Println(v)
+		return nil
+	})
+
+	switch err.(type) {
+	case ErrUnpopulated:
+		if create {
+			boltDB, err = createDB(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	return &AptDB{boltDB: boltDB}, err
 }
 
+func createDB(path string) (db *bolt.DB, err error) {
+	return nil, nil
+}
+
 func DownloadData(dataDir string) (err error) {
-	files := [4]string{"airports.csv", "runways.csv", "countries.csv", "regions.csv"}
+	files := [4]string{"airports.csv", "runways.csv", "countries.sv", "regions.csv"}
 	channels := make([]chan error, 4)
 
 	for i, file := range files {
@@ -101,14 +141,14 @@ func DownloadData(dataDir string) (err error) {
 
 	numDownloaded := 0
 	for numDownloaded < len(files) {
-		for i, c := range channels {
+		for _, c := range channels {
 			select {
 			case err = <-c:
 				if err != nil {
 					return err
 				}
 				numDownloaded += 1
-				//				fmt.Println("DID ONE", files[i]) // logging?
+				// fmt.Println("DID ONE", files[i]) // logging?
 			default:
 				time.Sleep(100 * time.Millisecond) // prevent spin-polling
 			}

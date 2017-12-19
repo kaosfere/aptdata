@@ -99,15 +99,15 @@ func DownloadData(dataDir string) (err error) {
 		go downloadDataFile(dataDir, file, fmt.Sprintf("http://ourairports.com/data/%s", file), c)
 	}
 
-	numdone := 0
-	for numdone < len(files) {
+	numDownloaded := 0
+	for numDownloaded < len(files) {
 		for i, c := range channels {
 			select {
 			case err = <-c:
 				if err != nil {
 					return err
 				}
-				numdone += 1
+				numDownloaded += 1
 				//				fmt.Println("DID ONE", files[i]) // logging?
 			default:
 				time.Sleep(100 * time.Millisecond) // prevent spin-polling

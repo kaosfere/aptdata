@@ -1,3 +1,12 @@
+/*
+Package aptdata provides an abstracted interface to a database of airport
+data.
+
+Currently, support is provided for downloading data from ourairports.com, and
+storing it as msgpacked data in a bolt database.  The actual storage backend is
+only accessed through an interface we provide, so it should be transparent to
+the user.
+*/
 package aptdata
 
 import "github.com/coreos/bbolt"
@@ -11,10 +20,13 @@ import "encoding/csv"
 import "strconv"
 import "github.com/pkg/errors"
 
+//AptDB provides an opaque wrapper around a boltdb database.  This is returned
+//to the user from OpenDB().
 type AptDB struct {
 	boltDB *bolt.DB
 }
 
+//Airport represents the fundamental data for an airport.
 type Airport struct {
 	Code      string
 	Name      string
@@ -28,6 +40,7 @@ type Airport struct {
 	Iata      string
 }
 
+//Runway represents the fundamental data for a runway.
 type Runway struct {
 	Airport       string
 	Length        int64
@@ -49,18 +62,24 @@ type Runway struct {
 	End2Displaced int64
 }
 
+//ErrUnpopulated provides a testable error condition for a database that exists
+//but has not been fully populated with data.
 type ErrUnpopulated struct {
 	msg string
 }
 
+//Provides the string representation of the ErrUnpopulated error message.
 func (e ErrUnpopulated) Error() (msg string) {
 	return e.msg
 }
 
+//Close closes the connection to the airport database.
 func (a *AptDB) Close() error {
 	return a.boltDB.Close()
 }
 
+//Populated checks for the presence of an IsPopulated key in the Meta
+//database, and if present confirms that it's true.
 func (a *AptDB) Populated() bool {
 	var isPopulated bool
 	err := a.boltDB.View(func(tx *bolt.Tx) error {
@@ -71,9 +90,8 @@ func (a *AptDB) Populated() bool {
 		msgpack.Unmarshal(b.Get([]byte("IsPopulated")), &isPopulated)
 		if isPopulated {
 			return nil
-		} else {
-			return ErrUnpopulated{"populated flag false"}
 		}
+		return ErrUnpopulated{"populated flag false"}
 	})
 
 	if err != nil {
@@ -83,6 +101,8 @@ func (a *AptDB) Populated() bool {
 	return true
 }
 
+//Load will process the downloaded airport and runways files and insert
+//records for each entry in the database.
 func (a *AptDB) Load(dataDir string) error {
 	err := loadAirports(a.boltDB)
 	if err != nil {
@@ -102,15 +122,14 @@ func (a *AptDB) Load(dataDir string) error {
 		b := tx.Bucket([]byte("Meta"))
 		m, _ := msgpack.Marshal(true)
 		err = b.Put([]byte("IsPopulated"), m)
-		if err != nil {
-			return err
-		}
-		return nil
+		return err
 	})
 
 	return err
 }
 
+//Reload deletes existing entries in the database, then loads new records
+//via a call to Load.
 func (a *AptDB) Reload(dataDir string) error {
 	err := a.boltDB.Update(func(tx *bolt.Tx) error {
 		err := tx.DeleteBucket([]byte("Airports"))
@@ -142,6 +161,7 @@ func (a *AptDB) Reload(dataDir string) error {
 	return err
 }
 
+//GetRunways returns a slice of Runway structs for a given airport.
 func (a *AptDB) GetRunways(ident string) ([]*Runway, error) {
 	var runways []*Runway
 	err := a.boltDB.View(func(tx *bolt.Tx) error {
@@ -163,6 +183,8 @@ func (a *AptDB) GetRunways(ident string) ([]*Runway, error) {
 	return runways, nil
 }
 
+//downloadDataFile is a utility function for downloading a source file and
+//saving it to the specified data directory.
 func downloadDataFile(dataDir string, filename string, url string, c chan error) {
 	fullPath := fmt.Sprintf("%s/%s", dataDir, filename)
 	out, err := os.Create(fullPath)
@@ -178,7 +200,7 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 		return
 	}
 	if response.StatusCode != 200 {
-		c <- errors.New(fmt.Sprintf("response code %d for %s", response.StatusCode, url))
+		c <- fmt.Errorf("response code %d for %s", response.StatusCode, url)
 		//c <- DownloadError{message: fmt.Sprintf("response code %d for %s", response.StatusCode, url)}
 		out.Close()
 		os.Remove(fullPath)
@@ -195,6 +217,7 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 	c <- nil
 }
 
+//OpenDB will open the boltdb and return it wrapped in an AptDB.
 func OpenDB(path string) (db *AptDB, err error) {
 	var boltDB *bolt.DB
 	//populated := false
@@ -207,6 +230,8 @@ func OpenDB(path string) (db *AptDB, err error) {
 	return &AptDB{boltDB: boltDB}, err
 }
 
+//DownloadData iterates over the named source files and calls downloadDataFile
+//for each one.
 func DownloadData(dataDir string) (err error) {
 	files := [4]string{"airports.csv", "runways.csv", "countries.csv", "regions.csv"}
 	channels := make([]chan error, 4)
@@ -235,7 +260,7 @@ func DownloadData(dataDir string) (err error) {
 				if err != nil {
 					return err
 				}
-				numDownloaded += 1
+				numDownloaded++
 				// fmt.Println("DID ONE", files[i]) // logging?
 			default:
 				time.Sleep(100 * time.Millisecond) // prevent spin-polling
@@ -245,6 +270,9 @@ func DownloadData(dataDir string) (err error) {
 	return nil
 }
 
+//loadAirports processes airports.csv and creates an Airport struct
+//representing each one which gets loaded into the Airports bucket in the
+//database.
 func loadAirports(db *bolt.DB) error {
 	apts, err := os.Open("airports.csv")
 	if err != nil {
@@ -303,6 +331,9 @@ func loadAirports(db *bolt.DB) error {
 	return err
 }
 
+//loadRunways processes runways.csv and creates a Runway struct
+//representing each one which gets loaded into the Runways bucket in the
+//database.
 func loadRunways(db *bolt.DB) error {
 	rwys, err := os.Open("runways.csv")
 	if err != nil {

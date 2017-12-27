@@ -1,29 +1,18 @@
 package aptdata
 
 import "github.com/coreos/bbolt"
-import _ "github.com/vmihailenco/msgpack"
+import "github.com/vmihailenco/msgpack"
 import "fmt"
 import "os"
 import "net/http"
 import "io"
-import "errors"
 import "time"
+import "encoding/csv"
+import "strconv"
+import "github.com/pkg/errors"
 
 type AptDB struct {
-	boltDB    *bolt.DB
-	populated bool
-}
-
-func (a *AptDB) Close() error {
-	return a.boltDB.Close()
-}
-
-type ErrUnpopulated struct {
-	msg string
-}
-
-func (e ErrUnpopulated) Error() (msg string) {
-	return e.msg
+	boltDB *bolt.DB
 }
 
 type Airport struct {
@@ -60,8 +49,121 @@ type Runway struct {
 	End2Displaced int64
 }
 
+type ErrUnpopulated struct {
+	msg string
+}
+
+func (e ErrUnpopulated) Error() (msg string) {
+	return e.msg
+}
+
+func (a *AptDB) Close() error {
+	return a.boltDB.Close()
+}
+
+func (a *AptDB) Populated() bool {
+	var isPopulated bool
+	err := a.boltDB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Meta"))
+		if b == nil {
+			return ErrUnpopulated{"meta bucket does not exist"}
+		}
+		msgpack.Unmarshal(b.Get([]byte("IsPopulated")), &isPopulated)
+		if isPopulated {
+			return nil
+		} else {
+			return ErrUnpopulated{"populated flag false"}
+		}
+	})
+
+	if err != nil {
+		return false
+	}
+
+	return true
+}
+
+func (a *AptDB) Load(dataDir string) error {
+	err := loadAirports(a.boltDB)
+	if err != nil {
+		return err
+	}
+
+	err = loadRunways(a.boltDB)
+	if err != nil {
+		return err
+	}
+
+	err = a.boltDB.Update(func(tx *bolt.Tx) error {
+		_, err = tx.CreateBucketIfNotExists([]byte("Meta"))
+		if err != nil {
+			return err
+		}
+		b := tx.Bucket([]byte("Meta"))
+		m, _ := msgpack.Marshal(true)
+		err = b.Put([]byte("IsPopulated"), m)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	return err
+}
+
+func (a *AptDB) Reload(dataDir string) error {
+	err := a.boltDB.Update(func(tx *bolt.Tx) error {
+		err := tx.DeleteBucket([]byte("Airports"))
+		if err != nil {
+			if err.Error() != "bucket not found" {
+				return errors.Wrap(err, "airports bucket")
+			}
+		}
+		err = tx.DeleteBucket([]byte("Runways"))
+		if err != nil {
+			if err.Error() != "bucket not found" {
+				return errors.Wrap(err, "runways bucket")
+			}
+		}
+		err = tx.DeleteBucket([]byte("Meta"))
+		if err != nil {
+			if err.Error() != "bucket not found" {
+				return errors.Wrap(err, "meta bucket")
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	err = a.Load(dataDir)
+	return err
+}
+
+func (a *AptDB) GetRunways(ident string) ([]*Runway, error) {
+	var runways []*Runway
+	err := a.boltDB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Runways"))
+		b2 := b.Bucket([]byte(ident))
+		b2.ForEach(func(k, v []byte) error {
+			var rwy Runway
+			msgpack.Unmarshal(v, &rwy)
+			runways = append(runways, &rwy)
+			return nil
+		})
+		return nil
+	})
+
+	if err != nil {
+		return runways, errors.Wrap(err, "get runways")
+	}
+
+	return runways, nil
+}
+
 func downloadDataFile(dataDir string, filename string, url string, c chan error) {
-	// fmt.Println("Downloading", filename)
 	fullPath := fmt.Sprintf("%s/%s", dataDir, filename)
 	out, err := os.Create(fullPath)
 	if err != nil {
@@ -93,7 +195,7 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 	c <- nil
 }
 
-func OpenDB(path string, create bool) (db *AptDB, err error) {
+func OpenDB(path string) (db *AptDB, err error) {
 	var boltDB *bolt.DB
 	//populated := false
 
@@ -102,36 +204,22 @@ func OpenDB(path string, create bool) (db *AptDB, err error) {
 		return nil, err
 	}
 
-	err = boltDB.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("Meta"))
-		if b == nil {
-			return ErrUnpopulated{"meta bucket does not exist"}
-		}
-		//v := b.Get([]byte("IsPopulated"))
-		//fmt.Println(v)
-		return nil
-	})
-
-	switch err.(type) {
-	case ErrUnpopulated:
-		if create {
-			boltDB, err = createDB(path)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	return &AptDB{boltDB: boltDB}, err
 }
 
-func createDB(path string) (db *bolt.DB, err error) {
-	return nil, nil
-}
-
 func DownloadData(dataDir string) (err error) {
-	files := [4]string{"airports.csv", "runways.csv", "countries.sv", "regions.csv"}
+	files := [4]string{"airports.csv", "runways.csv", "countries.csv", "regions.csv"}
 	channels := make([]chan error, 4)
+
+	_, err = os.Stat(dataDir)
+	if os.IsNotExist(err) {
+		err = os.Mkdir(dataDir, 0755)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
 
 	for i, file := range files {
 		c := make(chan error)
@@ -155,4 +243,147 @@ func DownloadData(dataDir string) (err error) {
 		}
 	}
 	return nil
+}
+
+func loadAirports(db *bolt.DB) error {
+	apts, err := os.Open("airports.csv")
+	if err != nil {
+		return err
+	}
+	defer apts.Close()
+
+	r := csv.NewReader(apts)
+	_, err = r.Read() // skip header
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err = tx.CreateBucketIfNotExists([]byte("Airports"))
+		if err != nil {
+			return err
+		}
+		b := tx.Bucket([]byte("Airports"))
+
+		for {
+			record, err := r.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return errors.Wrap(err, "airport read")
+			}
+
+			latitude, _ := strconv.ParseFloat(record[4], 64)
+			longitude, _ := strconv.ParseFloat(record[5], 64)
+			elevation, _ := strconv.ParseInt(record[6], 10, 64)
+			apt := Airport{record[1],
+				record[3],
+				latitude,
+				longitude,
+				elevation,
+				record[10],
+				record[9],
+				record[8],
+				record[7],
+				record[13]}
+
+			m, err := msgpack.Marshal(&apt)
+			if err != nil {
+				return errors.Wrap(err, "airport marshal")
+			}
+
+			err = b.Put([]byte(record[1]), m)
+			if err != nil {
+				return errors.Wrap(err, "database put")
+			}
+
+		}
+
+		return nil
+	})
+
+	return err
+}
+
+func loadRunways(db *bolt.DB) error {
+	rwys, err := os.Open("runways.csv")
+	if err != nil {
+		return err
+	}
+	defer rwys.Close()
+
+	r := csv.NewReader(rwys)
+	r.FieldsPerRecord = -1 // extra comma on first line
+	_, err = r.Read()      // skip header
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("Runways"))
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+		//b := tx.Bucket([]byte("Runways"))
+
+		for {
+			record, err := r.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Println(err)
+				return errors.Wrap(err, "runway read")
+			}
+
+			length, _ := strconv.ParseInt(record[3], 10, 64)
+			width, _ := strconv.ParseInt(record[4], 10, 64)
+			lighted := record[6] == "1"
+			closed := record[7] == "1"
+			end1Latitude, _ := strconv.ParseFloat(record[9], 64)
+			end1Longitude, _ := strconv.ParseFloat(record[10], 64)
+			end1Elevation, _ := strconv.ParseInt(record[11], 10, 64)
+			end1Heading, _ := strconv.ParseInt(record[12], 10, 64)
+			end1Displaced, _ := strconv.ParseInt(record[13], 10, 64)
+			end2Latitude, _ := strconv.ParseFloat(record[15], 64)
+			end2Longitude, _ := strconv.ParseFloat(record[16], 64)
+			end2Elevation, _ := strconv.ParseInt(record[17], 10, 64)
+			end2Heading, _ := strconv.ParseInt(record[18], 10, 64)
+			end2Displaced, _ := strconv.ParseInt(record[19], 10, 64)
+
+			rwy := Runway{record[2],
+				length,
+				width,
+				record[5],
+				lighted,
+				closed,
+				record[8],
+				end1Latitude,
+				end1Longitude,
+				end1Heading,
+				end1Elevation,
+				end1Displaced,
+				record[14],
+				end2Latitude,
+				end2Longitude,
+				end2Elevation,
+				end2Heading,
+				end2Displaced}
+
+			m, err := msgpack.Marshal(&rwy)
+			if err != nil {
+				return errors.Wrap(err, "runway marshal")
+			}
+
+			b2, err := b.CreateBucketIfNotExists([]byte(record[2]))
+			if err != nil {
+				return errors.Wrap(err, "bucket creation")
+			}
+			err = b2.Put([]byte(record[8]+"/"+record[14]), m)
+			if err != nil {
+				return errors.Wrap(err, "database put")
+			}
+
+		}
+
+		return nil
+	})
+
+	return err
 }

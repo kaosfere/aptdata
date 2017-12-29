@@ -128,6 +128,10 @@ func (a *AptDB) GetRunways(ident string) ([]*Runway, error) {
 	err := a.boltDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("Runways"))
 		b2 := b.Bucket([]byte(ident))
+		if b2 == nil {
+			return nil
+		}
+
 		b2.ForEach(func(k, v []byte) error {
 			var rwy Runway
 			msgpack.Unmarshal(v, &rwy)

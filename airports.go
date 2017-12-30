@@ -104,16 +104,17 @@ func (a *AptDB) GetAirport(ident string) (*Airport, error) {
 	return &apt, nil
 }
 
+//GetCodes returns a slice of strings of all known airport codes
 func (a *AptDB) GetCodes() ([]string, error) {
 	// TODO:  Errors?
 	var apts []string
 	err := a.boltDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("Airports"))
-		b.ForEach(func(k, v []byte) error {
+		err := b.ForEach(func(k, v []byte) error {
 			apts = append(apts, string(k))
 			return nil
 		})
-		return nil
+		return err
 	})
 
 	if err != nil {

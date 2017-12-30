@@ -47,6 +47,9 @@ func loadRunways(db *bolt.DB, dataDir string) error {
 	r := csv.NewReader(rwys)
 	r.FieldsPerRecord = -1 // extra comma on first line
 	_, err = r.Read()      // skip header
+	if err != nil {
+		return err
+	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists([]byte("Runways"))
@@ -132,13 +135,16 @@ func (a *AptDB) GetRunways(ident string) ([]*Runway, error) {
 			return nil
 		}
 
-		b2.ForEach(func(k, v []byte) error {
+		err := b2.ForEach(func(k, v []byte) error {
 			var rwy Runway
-			msgpack.Unmarshal(v, &rwy)
+			err := msgpack.Unmarshal(v, &rwy)
+			if err != nil {
+				return err
+			}
 			runways = append(runways, &rwy)
 			return nil
 		})
-		return nil
+		return err
 	})
 
 	if err != nil {

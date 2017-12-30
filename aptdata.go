@@ -52,7 +52,11 @@ func (a *AptDB) Populated() bool {
 		if b == nil {
 			return ErrUnpopulated{"meta bucket does not exist"}
 		}
-		msgpack.Unmarshal(b.Get([]byte("IsPopulated")), &isPopulated)
+		err := msgpack.Unmarshal(b.Get([]byte("IsPopulated")), &isPopulated)
+		if err != nil {
+			return err
+		}
+
 		if isPopulated {
 			return nil
 		}
@@ -167,8 +171,15 @@ func downloadDataFile(dataDir string, filename string, url string, c chan error)
 	if response.StatusCode != 200 {
 		c <- fmt.Errorf("response code %d for %s", response.StatusCode, url)
 		//c <- DownloadError{message: fmt.Sprintf("response code %d for %s", response.StatusCode, url)}
-		out.Close()
-		os.Remove(fullPath)
+		err = out.Close()
+		if err != nil {
+			c <- err
+			return
+		}
+		err = os.Remove(fullPath)
+		if err != nil {
+			c <- err
+		}
 		return
 	}
 	defer response.Body.Close()
